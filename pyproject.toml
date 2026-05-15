@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "context-os"
+version = "0.1.0"
+description = "Local-first, IDE-agnostic agentic memory lifecycle manager"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "DataDojo" }]
+keywords = ["llm", "claude", "cursor", "proxy", "context", "tokens"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "duckdb>=1.1",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "platformdirs>=4.3",
+    "typer>=0.13",
+    "rich>=13.9",
+    "pyyaml>=6.0",
+    "tiktoken>=0.8",
+    "lancedb>=0.13",
+    "pyarrow>=17",
+    "numpy>=1.26",
+    # Pinned: 0.3.x wheels include AVX-512 paths that crash on Intel 12th/13th-gen
+    # consumer CPUs where AVX-512 is microcode-disabled. 0.2.90 is the last known
+    # version with conservative CPU dispatch.
+    "llama-cpp-python==0.2.90",
+    "fastembed>=0.4",
+    "huggingface_hub>=0.26",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.40", "polars>=1.12", "streamlit-autorefresh>=1.0"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "types-pyyaml",
+]
+
+[project.scripts]
+contextos = "contextos.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/DataDojo/context-os"
+Repository = "https://github.com/DataDojo/context-os"
+
+[tool.hatch.build.targets.wheel]
+packages = ["contextos"]
+
+[tool.hatch.build.targets.sdist]
+# Be explicit about what ships in the source tarball; otherwise hatch sweeps in
+# any stray `.smoke*` / dev artifacts that aren't tracked by git.
+include = [
+  "/contextos",
+  "/tests",
+  "/scripts",
+  "/.github",
+  "/pyproject.toml",
+  "/README.md",
+  "/INSTALL.md",
+  "/LICENSE",
+  "/.gitignore",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["scripts/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
