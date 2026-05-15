@@ -13,7 +13,7 @@ Built by [DataDojo](https://github.com/DataDojo). Apache-2.0.
 ## Install
 
 ```bash
-pip install context-os
+pip install contextos
 contextos install
 ```
 
