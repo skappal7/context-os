@@ -1,6 +1,6 @@
 # Installing ContextOS
 
-This is the full first-run walkthrough. Most users only need `pip install contextos && contextos install` — but if you want to know exactly what's happening, this is the doc.
+This is the full first-run walkthrough. Most users only need `pip install contextos-dd && contextos install` — but if you want to know exactly what's happening, this is the doc.
 
 ---
 
@@ -19,7 +19,7 @@ ContextOS works on Windows, macOS, and Linux.
 ## Step 1 — Install the package
 
 ```bash
-pip install contextos
+pip install contextos-dd
 ```
 
 This pulls the package and its dependencies (FastAPI, DuckDB, LanceDB, llama-cpp-python, fastembed, etc.). Takes 30–60 seconds depending on your connection.
@@ -30,7 +30,7 @@ On Windows, `pip` may try to build `llama-cpp-python` from source and hit Window
 
 ```powershell
 pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-pip install contextos
+pip install contextos-dd
 ```
 
 ### Old or virtualised CPUs
@@ -171,7 +171,7 @@ rm -rf ~/.contextos          # Linux / macOS
 Remove-Item -Recurse -Force $env:LOCALAPPDATA\DataDojo\contextos   # Windows
 ```
 
-Then `pip uninstall contextos` to remove the package itself.
+Then `pip uninstall contextos-dd` to remove the package itself.
 
 ---
 
