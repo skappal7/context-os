@@ -6,6 +6,7 @@ import streamlit as st
 
 from contextos import __version__
 from contextos.dashboard import queries
+from contextos.dashboard.queries import DaemonUnreachable
 from contextos.settings import get_settings
 
 try:
@@ -16,24 +17,25 @@ except ImportError:
 st.set_page_config(page_title="ContextOS", page_icon="🧊", layout="wide")
 
 settings = get_settings()
-db_path = settings.db_path
+base_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
 
-# Live refresh — every 2s, capped at 1800 ticks (1h) before the user must click.
 if st_autorefresh is not None:
     st_autorefresh(interval=2000, limit=1800, key="contextos-tick")
 
 st.title("ContextOS")
-st.caption(f"v{__version__} · ledger: `{db_path}`")
+st.caption(f"v{__version__} · daemon: `{base_url}`")
 
-if not db_path.exists():
-    st.warning(
-        "Ledger not found yet. Start the daemon and make at least one API call "
-        "through the proxy, then this page will populate."
+try:
+    t = queries.totals(base_url)
+except DaemonUnreachable as e:
+    st.error(
+        f"Cannot reach the daemon at {base_url}.\n\n"
+        "Start it with `contextos start` in another terminal, then refresh."
     )
+    st.caption(f"Details: {e}")
     st.stop()
 
 # ---------- KPI strip ----------
-t = queries.totals(db_path)
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Sessions", f"{t.sessions:,}")
 k2.metric("Raw tokens in", f"{t.raw_tokens:,}")
@@ -48,9 +50,9 @@ left, right = st.columns([3, 2])
 
 with left:
     st.subheader("Recent sessions")
-    rows = queries.sessions(db_path, limit=50)
+    rows = queries.sessions(base_url, limit=50)
     if not rows:
-        st.info("No sessions yet.")
+        st.info("No sessions yet. Make a call from your IDE — this page auto-refreshes.")
         st.stop()
     df = pl.DataFrame(rows)
     st.dataframe(
@@ -58,13 +60,12 @@ with left:
             "session_id", "ide", "model", "started_at",
             "raw_tokens", "sent_tokens", "saved", "reduction_pct", "savings_usd",
         ]).to_pandas(),
-        use_container_width=True,
-        hide_index=True,
+        use_container_width=True, hide_index=True,
     )
 
 with right:
     st.subheader("By IDE")
-    by_ide = queries.by_dimension(db_path, "ide")
+    by_ide = queries.by_dimension(base_url, "ide")
     if by_ide:
         st.bar_chart(
             pl.DataFrame(by_ide).to_pandas().set_index("key")[["saved"]],
@@ -72,7 +73,7 @@ with right:
         )
 
     st.subheader("By model")
-    by_model = queries.by_dimension(db_path, "model")
+    by_model = queries.by_dimension(base_url, "model")
     if by_model:
         st.bar_chart(
             pl.DataFrame(by_model).to_pandas().set_index("key")[["savings_usd"]],
@@ -85,12 +86,11 @@ st.divider()
 st.subheader("Memory map")
 session_ids = [r["session_id"] for r in rows]
 selected = st.selectbox("Session", session_ids, index=0)
-mm = queries.memory_map(db_path, selected)
+mm = queries.memory_map(base_url, selected)
 if not mm:
     st.info("This session has no turns recorded yet.")
 else:
     mm_df = pl.DataFrame(mm)
-    # Color-coded heat bar chart per turn. Stacked by heat.
     heat_order = ["HOT", "WARM", "COLD", "DEAD"]
     pivot = (
         mm_df.with_columns(pl.lit(1).alias("count"))
@@ -102,6 +102,5 @@ else:
         pivot.to_pandas().set_index("turn_index")[cols_present],
         use_container_width=True,
     )
-
     st.caption("HOT = last 5 turns · WARM = within 15 · COLD = older. "
                "Heat is derived from turn position; live classification matches.")

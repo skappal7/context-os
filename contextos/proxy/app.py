@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from contextos import __version__
@@ -170,6 +171,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/_contextos/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    # ---- Read-only stats endpoints used by the dashboard ----
+    # The dashboard runs as a separate process; on Windows, DuckDB refuses a
+    # second connection (even read-only) while the daemon holds the file open.
+    # So the dashboard fetches over HTTP and only the daemon ever touches the DB.
+    from contextos.ledger import stats as _stats
+
+    @app.get("/_contextos/stats")
+    async def stats_endpoint() -> dict[str, Any]:
+        return await run_in_threadpool(
+            lambda: _stats.totals(app.state.ledger._conn).to_dict(),
+        )
+
+    @app.get("/_contextos/sessions")
+    async def sessions_endpoint(limit: int = 50) -> list[dict[str, Any]]:
+        return await run_in_threadpool(_stats.sessions, app.state.ledger._conn, limit)
+
+    @app.get("/_contextos/by/{dim}")
+    async def by_dim_endpoint(dim: str) -> list[dict[str, Any]]:
+        if dim not in {"ide", "model"}:
+            return JSONResponse({"error": "dim must be ide or model"}, status_code=400)
+        return await run_in_threadpool(_stats.by_dimension, app.state.ledger._conn, dim)
+
+    @app.get("/_contextos/memory-map/{session_id}")
+    async def memory_map_endpoint(session_id: str) -> list[dict[str, Any]]:
+        return await run_in_threadpool(
+            _stats.memory_map, app.state.ledger._conn, session_id,
+        )
 
     async def _post_response_hook(session_id: str, body_bytes: bytes) -> None:
         """Run trigger detection on the upstream response. Decoded best-effort —

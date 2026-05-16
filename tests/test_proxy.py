@@ -97,3 +97,44 @@ async def test_pipeline_rewrites_long_history(tmp_settings) -> None:
         assert rebuilt[-1]["content"] == "turn-24"
         # A placeholder must appear somewhere.
         assert any("ContextOS" in m.get("content", "") for m in rebuilt)
+
+
+@pytest.mark.asyncio
+async def test_stats_endpoints_serve_dashboard(tmp_settings) -> None:
+    """The dashboard hits these endpoints over HTTP — they must work even
+    while the proxy is also handling chat traffic."""
+    app = create_app(tmp_settings)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        # Seed a session by forwarding one request (mock upstream).
+        def upstream(r: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True},
+                                  headers={"content-type": "application/json"})
+        await client.get("/_contextos/health")
+        app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o",
+                  "messages": [{"role": "user", "content": "hi"}]},
+            headers={"user-agent": "cursor/1.0", "x-api-key": "test"},
+        )
+
+        r = await client.get("/_contextos/stats")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["sessions"] >= 1
+
+        r = await client.get("/_contextos/sessions?limit=10")
+        assert r.status_code == 200
+        sess = r.json()
+        assert sess and "session_id" in sess[0]
+
+        r = await client.get("/_contextos/by/ide")
+        assert r.status_code == 200
+
+        r = await client.get(f"/_contextos/memory-map/{sess[0]['session_id']}")
+        assert r.status_code == 200
+
+        r = await client.get("/_contextos/by/bogus")
+        assert r.status_code == 400
