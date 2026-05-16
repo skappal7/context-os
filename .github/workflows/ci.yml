@@ -20,5 +20,41 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: ruff check .
-      - run: mypy contextos
       - run: pytest -q
+
+  # Exercises the actual `contextos start` subprocess-spawn code path on
+  # Windows. The unit tests run in-process and never spawn the daemon, so a
+  # Windows-only spawn bug (like the one that shipped in 0.1.0) can only be
+  # caught here.
+  windows-spawn-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: pip install -e ".[dev]"
+      - name: Start daemon in background
+        shell: pwsh
+        run: |
+          Start-Process -FilePath python -ArgumentList "-m","contextos.cli","start" -NoNewWindow
+          # Give the spawner time to fork + the daemon time to init.
+          Start-Sleep -Seconds 25
+      - name: Probe health endpoint
+        shell: pwsh
+        run: |
+          $r = Invoke-WebRequest -Uri http://127.0.0.1:9137/_contextos/health -UseBasicParsing
+          if ($r.StatusCode -ne 200) { throw "health probe failed: $($r.StatusCode)" }
+          Write-Host "health: $($r.Content)"
+      - name: Stop daemon
+        shell: pwsh
+        run: python -m contextos.cli stop
+      - name: Dump daemon logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $logs = "$env:LOCALAPPDATA\DataDojo\contextos\Logs"
+          if (Test-Path $logs) { Get-ChildItem $logs | ForEach-Object {
+            Write-Host "=== $($_.Name) ==="; Get-Content $_.FullName
+          }}

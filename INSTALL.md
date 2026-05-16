@@ -183,7 +183,18 @@ Then `pip uninstall contextos-dd` to remove the package itself.
 contextos start
 ```
 
-If that fails, check `~/.contextos/logs/contextos.log`.
+If that fails, two logs exist for the background daemon:
+
+- `~/.contextos/logs/daemon.stderr.log` — anything the daemon wrote to stderr (uncaught exceptions, OS-level death messages, uvicorn startup errors)
+- `~/.contextos/logs/contextos.log` — the daemon's own Python logging (request flow, savings)
+
+For live diagnostics, run the daemon in the foreground:
+
+```bash
+contextos start --foreground
+```
+
+Everything streams to your terminal in real time. Ctrl+C stops it cleanly.
 
 ### `llama-cpp-python` install errored with `[WinError -1073741795]` or `STATUS_ILLEGAL_INSTRUCTION`
 

@@ -34,9 +34,14 @@ class ArchiveStore:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        if _TABLE in self._db.list_tables():
+        # LanceDB's list_tables() now returns a pagination object, not a
+        # plain list — `in` against it silently returns False. Catch the
+        # "already exists" path explicitly instead.
+        try:
             self._tbl = self._db.open_table(_TABLE)
             return
+        except (FileNotFoundError, ValueError):
+            pass
         schema = pa.schema([
             pa.field("archive_id", pa.string()),
             pa.field("session_id", pa.string()),

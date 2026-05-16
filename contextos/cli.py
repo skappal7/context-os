@@ -76,19 +76,59 @@ def start(foreground: bool = typer.Option(False, "--foreground", "-f")) -> None:
         from contextos.daemon import run
         run()
         return
-    # Background spawn (detached). Logs go to ~/.contextos/logs/.
+
+    # Background spawn. Two Windows-specific concerns to handle:
+    # 1. The child must outlive the parent — otherwise when this CLI exits
+    #    (timeout, Ctrl+C, anything), Windows tears the daemon down with it.
+    #    Solved with DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP.
+    # 2. Any death message the daemon emits to stderr must survive, or future
+    #    silent crashes are undebuggable. Solved by piping to log files in
+    #    the data dir.
+    s = get_settings()
+    s.log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = s.log_dir / "daemon.stdout.log"
+    stderr_log = s.log_dir / "daemon.stderr.log"
+
+    # Handles must remain open for the subprocess's lifetime — a context manager
+    # would close them before Popen inherits them. Suppress SIM115.
+    popen_kwargs: dict = {
+        "stdout": open(stdout_log, "ab", buffering=0),  # noqa: SIM115
+        "stderr": open(stderr_log, "ab", buffering=0),  # noqa: SIM115
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200.
+        # Together they make the child a true Windows service-style daemon that
+        # cannot be killed by the parent exiting or by Ctrl+C in the parent.
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        )
+
     proc = subprocess.Popen(
-        [sys.executable, "-m", "contextos.daemon"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
+        [sys.executable, "-m", "contextos.daemon"], **popen_kwargs,
     )
-    for _ in range(50):
+
+    # Health-poll for up to 30s with dot progress. LanceDB + DuckDB cold-start on
+    # a typical Windows laptop takes 5-10s; the old 5s window was too tight.
+    deadline = time.time() + 30.0
+    console.print("starting daemon ", end="")
+    while time.time() < deadline:
         if _is_running():
-            console.print(f"[green]Daemon started[/] (pid {proc.pid})")
+            console.print(f"\n[green]daemon ready[/] (pid {proc.pid})")
             return
-        time.sleep(0.1)
-    console.print("[red]Daemon failed to become healthy in time.[/]")
+        console.print(".", end="")
+        time.sleep(0.25)
+    console.print("")
+
+    # Timeout. Do NOT kill the daemon — it may still be coming up. Just report
+    # where the user can find evidence of what went wrong.
+    console.print("[yellow]Daemon didn't become healthy within 30s.[/]")
+    console.print(f"  pid: {proc.pid} (still running; investigate before killing)")
+    console.print(f"  stderr: {stderr_log}")
+    console.print(f"  stdout: {stdout_log}")
+    console.print(f"  app log: {s.log_dir / 'contextos.log'}")
+    console.print("\nTry: [bold]contextos start --foreground[/] to see live output.")
     raise typer.Exit(1)
 
 
