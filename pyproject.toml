@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "contextos-dd"
-version = "0.1.2"
+version = "0.1.3"
 description = "Local-first, IDE-agnostic agentic memory lifecycle manager"
 readme = "README.md"
 license = "Apache-2.0"

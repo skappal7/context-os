@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -27,8 +28,23 @@ class Tagged:
 
 def _fingerprint(msg: dict[str, Any]) -> str:
     role = str(msg.get("role", ""))
-    content = stringify_content(msg.get("content", "")).strip()
-    return hashlib.sha256(f"{role}\x1f{content}".encode()).hexdigest()
+    content = msg.get("content", "")
+    # Structured content (Anthropic tool_use/tool_result blocks) must be
+    # fingerprinted by shape — stringify_content returns "" for tool_use blocks,
+    # which would collapse them to DEAD and break the protocol.
+    if isinstance(content, list):
+        body = json.dumps(content, sort_keys=True, default=str)
+    else:
+        body = stringify_content(content).strip()
+    return hashlib.sha256(f"{role}\x1f{body}".encode()).hexdigest()
+
+
+def _is_empty(content: Any) -> bool:
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        return len(content) == 0
+    return content is None
 
 
 def classify(messages: list[dict[str, Any]]) -> list[Tagged]:
@@ -40,10 +56,9 @@ def classify(messages: list[dict[str, Any]]) -> list[Tagged]:
     for i, m in enumerate(messages):
         from_end = n - 1 - i
         fp = _fingerprint(m)
-        content = stringify_content(m.get("content", "")).strip()
 
         # DEAD: byte-identical earlier message, or empty content.
-        if not content or fp in seen:
+        if _is_empty(m.get("content", "")) or fp in seen:
             tagged.append(Tagged(i, m, Heat.DEAD))
             continue
         seen.add(fp)

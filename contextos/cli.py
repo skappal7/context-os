@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
+import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -14,7 +21,77 @@ from contextos import __version__
 from contextos.daemon import read_pid
 from contextos.daemon import stop as stop_daemon
 from contextos.installer import detect, install_all, uninstall_all
-from contextos.settings import get_settings
+from contextos.settings import Settings, get_settings
+
+
+def _dashboard_pid_file(s: Settings) -> Path:
+    return s.data_dir / "dashboard.pid"
+
+
+def _snapshot_db(s: Settings, keep: int = 7) -> Path | None:
+    """Copy ledger.duckdb to backups/ledger-YYYYMMDD-HHMMSS.duckdb, keep N newest.
+    Called BEFORE the daemon starts so the file is unlocked on Windows."""
+    if not s.db_path.exists():
+        return None
+    s.backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = s.backup_dir / f"ledger-{stamp}.duckdb"
+    try:
+        shutil.copy2(s.db_path, dst)
+    except OSError:
+        return None
+    snaps = sorted(s.backup_dir.glob("ledger-*.duckdb"))
+    for old in snaps[:-keep]:
+        with contextlib.suppress(OSError):
+            old.unlink()
+    return dst
+
+
+def _spawn_dashboard(s: Settings) -> int | None:
+    """Spawn Streamlit detached on the dashboard port. Returns child PID or None
+    if streamlit isn't installed."""
+    import importlib.util
+    if importlib.util.find_spec("streamlit") is None:
+        return None
+    script = Path(__file__).parent / "dashboard" / "app.py"
+    s.log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = s.log_dir / "dashboard.log"
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", str(script),
+        "--server.port", str(s.dashboard_port),
+        "--server.address", s.proxy_host,
+        "--server.headless", "true",
+        "--browser.gatherUsageStats", "false",
+    ]
+    kwargs: dict = {
+        "stdout": open(log_path, "ab", buffering=0),  # noqa: SIM115
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        )
+    proc = subprocess.Popen(cmd, **kwargs)
+    _dashboard_pid_file(s).write_text(str(proc.pid), encoding="utf-8")
+    return proc.pid
+
+
+def _stop_dashboard(s: Settings) -> bool:
+    pid_file = _dashboard_pid_file(s)
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            pid_file.unlink()
 
 app = typer.Typer(add_completion=False, help="ContextOS - agentic memory lifecycle manager")
 console = Console()
@@ -67,11 +144,22 @@ def status() -> None:
 
 
 @app.command()
-def start(foreground: bool = typer.Option(False, "--foreground", "-f")) -> None:
-    """Start the proxy daemon."""
+def start(
+    foreground: bool = typer.Option(False, "--foreground", "-f"),
+    no_dashboard: bool = typer.Option(False, "--no-dashboard",
+                                       help="Don't auto-launch the dashboard."),
+    no_browser: bool = typer.Option(False, "--no-browser",
+                                     help="Don't open the dashboard in a browser."),
+) -> None:
+    """Start the proxy daemon (and dashboard, by default)."""
     if _is_running():
         console.print("[yellow]Already running.[/]")
         return
+    # Backup ledger BEFORE anything claims the file lock.
+    s_pre = get_settings()
+    snap = _snapshot_db(s_pre)
+    if snap is not None:
+        console.print(f"[dim]ledger snapshot: {snap.name}[/]")
     if foreground:
         from contextos.daemon import run
         run()
@@ -116,6 +204,19 @@ def start(foreground: bool = typer.Option(False, "--foreground", "-f")) -> None:
     while time.time() < deadline:
         if _is_running():
             console.print(f"\n[green]daemon ready[/] (pid {proc.pid})")
+            if not no_dashboard:
+                dash_pid = _spawn_dashboard(s)
+                if dash_pid is None:
+                    console.print("[yellow]dashboard skipped: streamlit not installed.[/]")
+                    console.print("  install with: pip install 'contextos-dd[dashboard]'")
+                else:
+                    url = f"http://{s.proxy_host}:{s.dashboard_port}"
+                    console.print(f"[green]dashboard ready[/] (pid {dash_pid}) at {url}")
+                    if not no_browser:
+                        # Streamlit needs a couple seconds to bind. Open anyway —
+                        # the browser will retry the page if connection refused.
+                        with contextlib.suppress(Exception):
+                            webbrowser.open(url)
             return
         console.print(".", end="")
         time.sleep(0.25)
@@ -134,11 +235,41 @@ def start(foreground: bool = typer.Option(False, "--foreground", "-f")) -> None:
 
 @app.command()
 def stop() -> None:
-    """Stop the proxy daemon."""
+    """Stop the proxy daemon and dashboard."""
+    s = get_settings()
     if stop_daemon():
-        console.print("[green]Stop signal sent.[/]")
+        console.print("[green]daemon stop signal sent.[/]")
     else:
-        console.print("[yellow]Daemon not running.[/]")
+        console.print("[yellow]daemon not running.[/]")
+    if _stop_dashboard(s):
+        console.print("[green]dashboard stop signal sent.[/]")
+
+
+@app.command(name="export")
+def export_cmd(
+    session_id: str = typer.Argument(..., help="Session id (from `contextos status`)"),
+    out: Path = typer.Option(..., "--out", "-o", help="Output JSON file"),  # noqa: B008
+) -> None:
+    """Export the full, untrimmed history for a session to a JSON file.
+
+    Pulls from the daemon's append-only ledger over HTTP — proves that
+    classification/rebuild never deletes turns from disk."""
+    s = get_settings()
+    url = f"http://{s.proxy_host}:{s.proxy_port}/_contextos/session/{session_id}/full"
+    try:
+        r = httpx.get(url, timeout=10.0)
+    except httpx.HTTPError as e:
+        console.print(f"[red]daemon unreachable:[/] {e}")
+        raise typer.Exit(1) from None
+    if r.status_code != 200:
+        console.print(f"[red]error {r.status_code}:[/] {r.text[:200]}")
+        raise typer.Exit(1)
+    turns = r.json()
+    if not turns:
+        console.print(f"[yellow]no turns recorded for session {session_id}[/]")
+        raise typer.Exit(1)
+    out.write_text(json.dumps(turns, indent=2), encoding="utf-8")
+    console.print(f"[green]wrote {len(turns)} turns[/] -> {out}")
 
 
 @app.command()

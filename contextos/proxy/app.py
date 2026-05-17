@@ -24,6 +24,7 @@ from contextos.pricing import savings_usd
 from contextos.proxy.payload import detect_model, extract_messages, stringify_content
 from contextos.reconstructor import rebuild_messages
 from contextos.retrieval import detect_trigger, recall_for
+from contextos.safety import pin_critical, validate_payload
 from contextos.session_memory import SessionMemory, cold_runs
 from contextos.settings import Settings, get_settings
 from contextos.tokens import count_message_tokens, count_tokens
@@ -75,6 +76,7 @@ async def _process_body(
     memory: SessionMemory,
     session_id: str,
     ide: str | None,
+    passthrough: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     try:
         body = json.loads(body_bytes)
@@ -95,7 +97,22 @@ async def _process_body(
             content=content, token_count_raw=count_tokens(content),
         ))
 
+    raw_tokens = count_message_tokens(messages)
+
+    # Kill-switch: record everything, modify nothing. Forward the original body.
+    if passthrough:
+        await ledger.record_payload(session_id, [], raw_tokens, 0)
+        await ledger.add_session_tokens(session_id, raw_tokens, raw_tokens, 0.0)
+        return body_bytes, {
+            "raw_tokens": raw_tokens, "sent_tokens": raw_tokens,
+            "saved": 0, "savings_usd": 0.0, "model": model, "passthrough": True,
+        }
+
     tagged = classify(messages)
+    # Protocol-aware pin: any turn carrying a tool_use referenced by a surviving
+    # tool_result, a tool_result block, or a cache_control marker is promoted to
+    # HOT so rebuild can't drop it. This is the fix for the Claude Code freeze.
+    pin_critical(tagged, messages)
 
     # Submit any unseen COLD runs for async compaction. Never blocks.
     for run_id, run in cold_runs(tagged):
@@ -109,13 +126,24 @@ async def _process_body(
     rebuilt = rebuild_messages(tagged, summaries)
     rebuilt = _inject_recalls(rebuilt, memory.pop_recalls(session_id))
 
-    raw_tokens = count_message_tokens(messages)
+    new_body = dict(body, messages=rebuilt)
+    ok, reason = validate_payload(new_body)
+    if not ok:
+        # Fail-closed: rebuild produced something that would 400 upstream.
+        # Forward the original body untouched. User gets correctness, not savings.
+        log.warning("rebuild invalid (%s); forwarding original body untouched", reason)
+        await ledger.record_payload(session_id, [], raw_tokens, 0)
+        await ledger.add_session_tokens(session_id, raw_tokens, raw_tokens, 0.0)
+        return body_bytes, {
+            "raw_tokens": raw_tokens, "sent_tokens": raw_tokens,
+            "saved": 0, "savings_usd": 0.0, "model": model,
+            "failclosed": reason,
+        }
+
     sent_tokens = count_message_tokens(rebuilt)
     saved = max(0, raw_tokens - sent_tokens)
     dollars = savings_usd(model, saved)
-
-    body["messages"] = rebuilt
-    new_bytes = json.dumps(body).encode("utf-8")
+    new_bytes = json.dumps(new_body).encode("utf-8")
 
     await ledger.record_payload(session_id, [], sent_tokens, saved)
     await ledger.add_session_tokens(session_id, raw_tokens, sent_tokens, dollars)
@@ -200,6 +228,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _stats.memory_map, app.state.ledger._conn, session_id,
         )
 
+    @app.get("/_contextos/session/{session_id}/full")
+    async def full_session_endpoint(session_id: str) -> list[dict[str, Any]]:
+        # Returns every turn ever recorded for this session, in order. The
+        # ledger is append-only: nothing the pipeline does ever removes turns
+        # from this view. Used by `contextos export` and the dashboard's
+        # "Raw history" tab to prove no history was lost.
+        return await run_in_threadpool(
+            _stats.full_session, app.state.ledger._conn, session_id,
+        )
+
     async def _post_response_hook(session_id: str, body_bytes: bytes) -> None:
         """Run trigger detection on the upstream response. Decoded best-effort —
         SSE chunks and JSON bodies are both pattern-matched as raw text."""
@@ -226,11 +264,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 memory=app.state.memory,
                 session_id=session_id,
                 ide=ide,
+                passthrough=app.state.settings.passthrough,
             )
             if stats:
-                log.info("session=%s model=%s raw=%d sent=%d saved=%d ($%.4f)",
+                tag = ""
+                if stats.get("passthrough"):
+                    tag = " [passthrough]"
+                elif stats.get("failclosed"):
+                    tag = f" [failclosed: {stats['failclosed']}]"
+                log.info("session=%s model=%s raw=%d sent=%d saved=%d ($%.4f)%s",
                          session_id, stats.get("model"), stats["raw_tokens"],
-                         stats["sent_tokens"], stats["saved"], stats["savings_usd"])
+                         stats["sent_tokens"], stats["saved"], stats["savings_usd"], tag)
             body = new_body
 
         url = f"{upstream_base.rstrip('/')}/{path.lstrip('/')}"

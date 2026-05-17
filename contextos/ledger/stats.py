@@ -74,6 +74,21 @@ def by_dimension(conn: duckdb.DuckDBPyConnection, column: str) -> list[dict[str,
     ]
 
 
+def full_session(conn: duckdb.DuckDBPyConnection, session_id: str) -> list[dict[str, Any]]:
+    """Every turn ever recorded for this session. The ledger is append-only;
+    no pipeline action deletes from this view."""
+    rows = conn.execute(
+        "SELECT turn_index, role, raw_content, token_count_raw FROM turns "
+        "WHERE session_id = ? ORDER BY turn_index",
+        [session_id],
+    ).fetchall()
+    return [
+        {"turn_index": int(r[0]), "role": r[1], "content": r[2],
+         "tokens": int(r[3] or 0)}
+        for r in rows
+    ]
+
+
 def memory_map(conn: duckdb.DuckDBPyConnection, session_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT turn_index, role, token_count_raw FROM turns WHERE session_id = ? "

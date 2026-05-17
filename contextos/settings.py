@@ -43,6 +43,11 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Emergency kill-switch. When true, the proxy still records every turn to
+    # the ledger but forwards the original request body untouched (no
+    # classification, no rebuild). Set via CONTEXTOS_PASSTHROUGH=1.
+    passthrough: bool = False
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "ledger.duckdb"
@@ -77,11 +82,15 @@ def get_settings() -> Settings:
 
 def configure_logging(settings: Settings | None = None) -> None:
     s = settings or get_settings()
+    from logging.handlers import RotatingFileHandler
+    # 10 MB x 5 = 50 MB cap on the app log. Daemon stdout/stderr are kept
+    # separately by the CLI's Popen and rotated externally.
+    handler = RotatingFileHandler(
+        s.log_dir / "contextos.log", maxBytes=10 * 1024 * 1024,
+        backupCount=5, encoding="utf-8",
+    )
     logging.basicConfig(
         level=s.log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[
-            logging.FileHandler(s.log_dir / "contextos.log", encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
+        handlers=[handler, logging.StreamHandler()],
     )
