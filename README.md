@@ -7,11 +7,14 @@
 **A local-first memory layer for Claude Code, Cursor, Codex, Continue, and Aider.**
 ContextOS sits between your IDE and the cloud LLM, quietly trimming stale conversation history before it costs you money.
 
+[![Website](https://img.shields.io/badge/🌐_website-contextosmem.netlify.app-ff4785)](https://contextosmem.netlify.app/)
 [![PyPI](https://img.shields.io/pypi/v/contextos-dd?color=blue&label=pypi)](https://pypi.org/project/contextos-dd/)
 [![Python](https://img.shields.io/pypi/pyversions/contextos-dd)](https://pypi.org/project/contextos-dd/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-55%20passing-brightgreen)](#)
 [![Local-First](https://img.shields.io/badge/privacy-local--first-purple)](#-privacy)
+
+**🌐 [contextosmem.netlify.app](https://contextosmem.netlify.app/)** · 📦 [PyPI](https://pypi.org/project/contextos-dd/) · 🐛 [Issues](https://github.com/skappal7/context-os/issues)
 
 ```bash
 pip install contextos-dd && contextos install
@@ -277,6 +280,8 @@ Vendored under the hood: [FastAPI](https://fastapi.tiangolo.com/) · [DuckDB](ht
 <div align="center">
 
 ---
+
+### 🌐 [contextosmem.netlify.app](https://contextosmem.netlify.app/)
 
 **If ContextOS saves you tokens, give it a ⭐ on [GitHub](https://github.com/skappal7/context-os).**
 
